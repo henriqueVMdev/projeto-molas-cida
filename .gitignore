@@ -1,5 +1,6 @@
-# Só o molas.py vai para o repositório. Ficam fora: conferencia.py e referencias.md (conferência local),
+# Só o molas.py e o analise_complementar.py vão para o repositório. Ficam fora: conferencia.py e referencias.md (conferência local),
 # a planilha, a pasta saidas/ (gerada pelo programa), os ambientes virtuais e o cache do Python.
 /*
 !/molas.py
+!/analise_complementar.py
 !/.gitignore

@@ -6,11 +6,10 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 # scipy.stats faz o intervalo de confiança (t de Student), a média geométrica, a regressão linear (R²) e a
-# correlação de Spearman. statsmodels faz a regressão múltipla das elasticidades. adjust_text afasta os
+# correlação de Spearman. adjust_text afasta os
 # rótulos dos pontos para um não cobrir o outro. Line2D, Patch, NullLocator e LinearSegmentedColormap só
 # montam legendas, eixos e a escala de cor dos gráficos.
 from scipy import stats
-import statsmodels.api as sm
 from adjustText import adjust_text
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
@@ -26,14 +25,10 @@ NIVEL_SIGNIFICANCIA = 0.05
 MINIMO_PONTOS_POR_MOLA = 3 #com menos pontos, a mola sai sem IC e sem R²
 PASTA_SAIDAS = "saidas"
 IDS_PROFESSOR = [107, 101, 111, 82, 94, 113, 105, 112, 122]
-# Expoentes que a teoria de viga prevê para a rigidez: K proporcional a t·h³ / (n·Ltot³).
-TEORIA_VIGA = {'t': 1, 'h': 3, 'n': -1, 'Ltot': -3}
-# Limites dos três métodos de outliers: regra do boxplot (1,5 × intervalo entre quartis), resíduo do modelo
-# de rigidez acima de 2 desvios-padrão, e linearidade do ensaio (R² abaixo de 0,98 ou rigidez ponto a ponto
-# variando mais de 20% dentro da mesma mola, medida como maior ÷ menor − 1 sem o primeiro ponto, porque o
-# primeiro ponto tem carga baixa e uma pequena folga nele infla a variação sem mudar o K).
+# Limites da marcação de outliers: regra do boxplot (1,5 × intervalo entre quartis) e linearidade do ensaio (R²
+# abaixo de 0,98 ou rigidez ponto a ponto variando mais de 20% dentro da mesma mola, medida como maior ÷ menor − 1
+# sem o primeiro ponto, porque o primeiro ponto tem carga baixa e uma pequena folga nele infla a variação).
 FATOR_IQR = 1.5
-LIMITE_RESIDUO = 2.0
 LIMITE_R2 = 0.98
 LIMITE_VARIACAO_PONTOS = 0.20
 # Rigidez principal de cada mola: 'media_pontos' = média de carga ÷ alongamento ponto a ponto (fórmula da
@@ -46,6 +41,13 @@ LIMITE_PEARSON = 0.70
 # Regra de eliminação de outliers: a mola sai da análise se ficar fora do limite em pelo menos este número de
 # boxplots das grandezas de conferência (regra do artigo do professor).
 MINIMO_BOXPLOTS_PARA_ELIMINAR = 2
+# Espessura de projeto (nominal) de cada mola, em mm. Foi deduzida do comprimento por espira (C ÷ n), que cai em
+# três valores: cerca de 41, 27 e 21 mm. Serve só para comparar com o h medido; os cálculos usam o h medido.
+H_NOMINAL = {3.0: [107, 101, 113, 122, 73, 71, 60, 36], 2.0: [111, 82, 94, 12, 80], 1.5: [105, 112, 56, 65]}
+# Planilha com as leituras individuais das molas do grupo (aba 'dimensoes'). Se o arquivo não estiver na pasta,
+# o programa roda sem as colunas de leituras. Leituras eliminadas por erro de registro: (mola, grandeza, posição).
+ARQUIVO_LEITURAS = "molas_dados_brutos.xlsx"
+LEITURAS_ELIMINADAS = {(60, 'h', 1): "6,25 mm entre leituras de 3,20 a 3,26 mm: erro de digitação"}
 # Interpretação de cada mola apontada como outlier, escrita depois de olhar os dados e conferida no loop de
 # conferência. Mola apontada que não estiver aqui aparece como "sem interpretação registrada".
 INTERPRETACAO_OUTLIERS = {
@@ -55,7 +57,6 @@ INTERPRETACAO_OUTLIERS = {
     36: "Provável erro de dado: C = 260,1 idêntico ao da 71 e fora do padrão C/n das molas de h parecido. Afeta só a dutilidade.",
     94: "Provável erro de dado na massa: o índice de densidade é cerca do dobro do das demais e a massa ÷ t fica muito acima da linha das outras molas com fio parecido, enquanto a rigidez segue o modelo.",
     112: "Efeito de medida em carga baixa: a variação vem do primeiro ponto (0,1 kgf), onde uma pequena folga pesa muito.",
-    65: "Incerto, provavelmente limite do método: só 2 pontos de ensaio e K abaixo do previsto, mas boa parte vem da diferença professor × grupo (com a variável de origem o resíduo fica dentro do limite) e com 17 molas uma marcação assim pode sair por acaso.",
 }
 # Grandezas que cada erro de dado provável afeta. No cenário sem prováveis erros, a mola sai só das análises que
 # usam essas grandezas: o C errado das molas 71 e 36 só pesa em C e na dutilidade (que divide por C); a massa errada da 94 só pesa em m e densidade aparente. Mola com erro sem entrada aqui sai de tudo.
@@ -189,6 +190,29 @@ conferencia_df = dados_df[['ID', 'origem', 'rigidez', 'dutilidade']].assign(
     densidade_aparente=derivadas_df['densidade_aparente'],
 )
 
+# Medidas de h de cada mola: o valor usado nos cálculos (mediana das leituras nas molas do grupo, valor único
+# nas do professor), o h nominal e o desvio entre os dois. Quando a planilha de leituras está na pasta, entram
+# também a quantidade de leituras, o mínimo, o máximo e a amplitude (máximo − mínimo), que mostra o quanto o h
+# varia ao longo da mola. As molas do professor têm uma leitura só, então ficam sem amplitude.
+nominal_por_mola = {id_mola: nominal for nominal, ids_molas in H_NOMINAL.items() for id_mola in ids_molas}
+medidas_h_df = dados_df[['ID', 'origem', 'h']].assign(h_nominal=dados_df['ID'].map(nominal_por_mola))
+medidas_h_df['h_desvio_nominal'] = medidas_h_df['h'] - medidas_h_df['h_nominal']
+if os.path.exists(ARQUIVO_LEITURAS):
+    leituras_df = pd.read_excel(ARQUIVO_LEITURAS, sheet_name='dimensoes')
+    eliminada = [chave in LEITURAS_ELIMINADAS for chave in zip(leituras_df['id'], leituras_df['grandeza'], leituras_df['posicao'])]
+    leituras_h = leituras_df[(leituras_df['grandeza'] == 'h') & ~np.array(eliminada)]
+    resumo_leituras = leituras_h.groupby('id')['valor_mm'].agg(h_leituras='size', h_minimo='min', h_maximo='max')
+    resumo_leituras['h_amplitude'] = resumo_leituras['h_maximo'] - resumo_leituras['h_minimo']
+    medidas_h_df = medidas_h_df.merge(resumo_leituras, left_on='ID', right_index=True, how='left')
+    medidas_h_df['h_leituras'] = medidas_h_df['h_leituras'].fillna(1).astype(int)
+else:
+    print(f"AVISO: {ARQUIVO_LEITURAS} não está na pasta; a tabela de medidas de h sai sem as colunas de leituras.")
+desvio_h_por_origem = medidas_h_df.groupby('origem')['h_desvio_nominal'].agg(['mean', 'min', 'max'])
+# Mesmo índice de rigidez, calculado com o h nominal no lugar do medido. Se a reta K × índice ajusta melhor com
+# o nominal, o h medido está carregando um erro que não existe na mola.
+indice_rigidez_nominal = dados_df['t'] * medidas_h_df['h_nominal']**3 / (dados_df['n'] * dados_df['Ltot']**3)
+r2_com_h_nominal = np.corrcoef(indice_rigidez_nominal, dados_df['rigidez'])[0, 1] ** 2
+
 
 # Termina todo gráfico novo do mesmo jeito: ajusta as margens (margem_inferior reserva espaço para a legenda
 # embaixo), salva o PNG em saidas/ e mostra na tela.
@@ -319,43 +343,6 @@ def grafico_matriz(rho, p_valor, rotulos, titulo, nome_arquivo, rotulo_escala='�
     salvar_grafico(figura, nome_arquivo)
 
 
-# Gráfico das elasticidades: para cada parâmetro, o expoente medido (ponto escuro) com o IC 95% (traço) e o
-# expoente da teoria de viga (losango vazado). Se o losango cai dentro do traço, os dados não contradizem a
-# teoria. Expoente positivo = aumentar o parâmetro aumenta K; negativo = diminui.
-def grafico_elasticidades(elasticidades, nome_arquivo):
-    figura, eixo = plt.subplots(figsize=(8, 1.2 + 0.8 * len(elasticidades)))
-    posicoes = np.arange(len(elasticidades))[::-1]
-    erros = [elasticidades['expoente'] - elasticidades['IC_inf'], elasticidades['IC_sup'] - elasticidades['expoente']]
-    eixo.errorbar(elasticidades['expoente'], posicoes, xerr=erros, fmt='o', color='#333333', capsize=4, label='Medido (IC 95%)')
-    eixo.scatter(elasticidades['teoria_viga'], posicoes, marker='D', s=60, facecolor='white', edgecolor='#777777', linewidth=1.5, zorder=3, label='Teoria de viga')
-    for posicao, expoente in zip(posicoes, elasticidades['expoente']):
-        eixo.annotate(f"{expoente:+.2f}".replace('.', ','), (expoente, posicao), xytext=(0, 9), textcoords='offset points', ha='center', fontsize=9)
-    eixo.axvline(0, color='#bbbbbb', linewidth=1)
-    eixo.set_ylim(-0.6, len(elasticidades) - 0.2) #espaço para o valor de cima não encostar no título
-    eixo.set(yticks=posicoes, yticklabels=elasticidades['descricao'], xlabel="Expoente (% de mudança em K para 1% de mudança no parâmetro)",
-             title="Elasticidades da rigidez K, com os outros parâmetros fixos")
-    eixo.legend(frameon=False, loc='lower right')
-    salvar_grafico(figura, nome_arquivo)
-
-
-# Rigidez prevista pelo modelo de elasticidades contra a medida, em escala log. Mola em cima da linha
-# diagonal = o modelo acerta; longe da linha = mola fora do padrão (é a base do método 2 de outliers).
-def grafico_previsto_medido(tabela, rigidez_prevista, r2, nome_arquivo):
-    figura, eixo = plt.subplots(figsize=(7, 6))
-    sb.scatterplot(x=rigidez_prevista, y=tabela['rigidez'], hue=tabela['origem'], palette=COR_ORIGEM, s=40, ax=eixo, zorder=3)
-    limites = [min(rigidez_prevista.min(), tabela['rigidez'].min()) * 0.85, max(rigidez_prevista.max(), tabela['rigidez'].max()) * 1.15]
-    eixo.plot(limites, limites, color='#777777', linewidth=1.2, label='Previsto = medido')
-    eixo.set(xscale='log', yscale='log', xlim=limites, ylim=limites, xlabel="Rigidez prevista pelo modelo (kgf/mm)", ylabel="Rigidez medida K (kgf/mm)",
-             title=f"Modelo de elasticidades: previsto × medido (R² = {r2:.3f})".replace('.', ','))
-    formatar_eixo_log(eixo.xaxis, marcas_do_eixo(tabela['rigidez']))
-    formatar_eixo_log(eixo.yaxis, marcas_do_eixo(tabela['rigidez']))
-    eixo.legend(frameon=False, title=None)
-    figura.tight_layout()
-    rotulos = [eixo.text(x, y, str(id_mola), fontsize=7, color='#444444') for id_mola, x, y in zip(tabela['ID'], rigidez_prevista, tabela['rigidez'])]
-    adjust_text(rotulos, x=rigidez_prevista.to_numpy(), y=tabela['rigidez'].to_numpy(), ax=eixo)
-    salvar_grafico(figura, nome_arquivo)
-
-
 # Método 1 de outliers, regra do boxplot: para cada grandeza, valor abaixo de Q1 − 1,5·IQR ou acima de
 # Q3 + 1,5·IQR (Q1 e Q3 = quartis, IQR = Q3 − Q1). Devolve uma linha por valor fora, com o motivo.
 def outliers_boxplot(tabela, rotulos, metodo):
@@ -396,21 +383,6 @@ def grafico_boxplots(tabela, rotulos, outliers, titulo, nome_arquivo):
     salvar_grafico(figura, nome_arquivo, 0.04)
 
 
-# Resíduo padronizado de cada mola no modelo de rigidez: quantos desvios-padrão o K medido fica acima (barra
-# para cima) ou abaixo (para baixo) do previsto pela geometria. Fora das linhas tracejadas (±2) = outlier pelo
-# método 2. As cores por origem mostram se professor e grupo ficam de lados diferentes.
-def grafico_residuos(tabela, residuo_padronizado, nome_arquivo):
-    residuos = tabela.assign(residuo=residuo_padronizado.to_numpy(), mola=tabela['ID'].astype(str)).sort_values('residuo')
-    figura, eixo = plt.subplots(figsize=(10, 4.5))
-    sb.barplot(residuos, x='mola', y='residuo', hue='origem', palette=COR_ORIGEM, saturation=1, dodge=False, ax=eixo)
-    for limite in (-LIMITE_RESIDUO, LIMITE_RESIDUO):
-        eixo.axhline(limite, color='#999999', linestyle='--', linewidth=1)
-    eixo.axhline(0, color='#555555', linewidth=1)
-    eixo.set(xlabel='ID da mola', ylabel='Resíduo padronizado (desvios-padrão)', title='Resíduo do modelo de rigidez por mola (método 2 de outliers)')
-    eixo.legend(title=None, frameon=False)
-    salvar_grafico(figura, nome_arquivo)
-
-
 # Curva carga × alongamento de cada mola: os pontos do ensaio e a reta da rigidez K pela origem. O título traz
 # o R² e a variação da rigidez ponto a ponto (com e sem o 1º ponto); as molas fora do padrão pelo método 3 têm o título marcado.
 def grafico_curvas_ensaio(ensaios, por_mola, nome_arquivo):
@@ -437,16 +409,19 @@ def grafico_curvas_ensaio(ensaios, por_mola, nome_arquivo):
 
 
 # Gráfico da comparação com e sem outliers: para cada parâmetro, o ρ com todas as molas e nos cenários sem
-# as prováveis de erro de dado e no teste de estresse. Marcadores próximos = conclusão estável; marcador que
+# os prováveis erros de dado e sem as eliminadas pela regra (quando houver). Marcadores próximos = conclusão estável; marcador que
 # cruza a faixa cinza (não significativo) = conclusão que depende das molas marcadas.
 def grafico_com_sem_outliers(correlacoes_cenarios, parametros, rho_minimo, titulo, nome_arquivo):
-    cenarios_mostrados = {'todas as molas': ('o', '#222222'), 'sem prováveis erros de dado': ('s', '#777777'), 'teste de estresse: sem todas as marcadas': ('^', '#aaaaaa')}
+    cenarios_mostrados = {'todas as molas': ('o', '#222222'), 'sem prováveis erros de dado': ('s', '#777777'), 'sem as eliminadas pela regra dos 2 boxplots': ('^', '#aaaaaa')}
     figura, eixos = plt.subplots(1, 2, figsize=(11, 1.9 + 0.5 * len(parametros)), sharey=True)
     posicoes = np.arange(len(parametros))[::-1]
     for eixo, resultado in zip(eixos, ['Rigidez K', 'Dutilidade']):
         eixo.axvspan(-rho_minimo, rho_minimo, color='#eeeeee', zorder=0)
         for deslocamento, (cenario, (marcador, cor)) in zip((0.2, 0, -0.2), cenarios_mostrados.items()):
-            linhas = correlacoes_cenarios[(correlacoes_cenarios['cenario'] == cenario) & (correlacoes_cenarios['resultado'] == resultado)].set_index('parametro').loc[list(parametros)]
+            linhas = correlacoes_cenarios[(correlacoes_cenarios['cenario'] == cenario) & (correlacoes_cenarios['resultado'] == resultado)].set_index('parametro')
+            if linhas.empty: #cenário que não existe nesta rodada (ex.: nenhuma mola eliminada pela regra)
+                continue
+            linhas = linhas.loc[list(parametros)]
             eixo.scatter(linhas['rho'], posicoes + deslocamento, marker=marcador, color=cor, s=40, label=cenario, zorder=3)
         eixo.axvline(0, color='#555555', linewidth=1)
         eixo.set(xlim=(-1.1, 1.1), yticks=posicoes, yticklabels=list(parametros.values()), xlabel='ρ de Spearman', title=resultado)
@@ -578,6 +553,18 @@ def grafico_regressao_simples(tabela, inclinacao, intercepto, r2, nome_arquivo):
     salvar_grafico(figura, nome_arquivo)
 
 
+# Desvio do h medido em relação ao nominal, uma barra por mola (azul = grupo, laranja = professor). Barras para
+# cima = h medido acima do nominal. Se as duas origens ficam de lados diferentes, a diferença é da medição.
+def grafico_desvio_h(medidas_h, nome_arquivo):
+    desvios = medidas_h.assign(mola=medidas_h['ID'].astype(str)).sort_values('h_desvio_nominal')
+    figura, eixo = plt.subplots(figsize=(10, 4.5))
+    sb.barplot(desvios, x='mola', y='h_desvio_nominal', hue='origem', palette=COR_ORIGEM, saturation=1, dodge=False, ax=eixo)
+    eixo.axhline(0, color='#555555', linewidth=1)
+    eixo.set(xlabel='ID da mola', ylabel='h medido − h nominal (mm)', title='Desvio do h medido em relação ao nominal, por mola')
+    eixo.legend(title=None, frameon=False)
+    salvar_grafico(figura, nome_arquivo)
+
+
 # Estatísticas entre molas: uma tabela para rigidez e dutilidade (em %) e outra para as dimensões derivadas.
 estatisticas_df = estatisticas_por_conjunto(
     dados_df.assign(dutilidade_pct=dados_df['dutilidade'] * 100),
@@ -615,68 +602,22 @@ def pares_significativos(rho, p_valor):
     return pares[pares['p_valor'] < NIVEL_SIGNIFICANCIA].sort_values('rho', key=abs, ascending=False)
 
 
-# Elasticidades da rigidez: regressão em log (statsmodels OLS) ln K = a0 + a1·ln t + a2·ln h + a3·ln n +
-# a4·ln Ltot. Cada expoente diz quantos % K muda para 1% de mudança no parâmetro, com os outros fixos; por isso
-# separa efeitos que a correlação simples mistura (ex.: t e n parecem fracos no ρ). A tabela compara cada
-# expoente com a teoria de viga (1, 3, −1, −3): o p_vs_teoria testa se a diferença para a teoria é
-# significativa, e teoria_no_IC diz se o valor teórico cai dentro do IC 95%.
-parametros_modelo = list(TEORIA_VIGA)
-modelo_rigidez = sm.OLS(np.log(dados_df['rigidez']), sm.add_constant(np.log(dados_df[parametros_modelo]))).fit()
-intervalo_modelo = modelo_rigidez.conf_int(1 - NIVEL_CONFIANCA).loc[parametros_modelo]
-rho_com_rigidez = correlacoes_principais_df.query("resultado == 'Rigidez K'").set_index('parametro')['rho']
-elasticidades_df = pd.DataFrame({
-    'parametro': parametros_modelo,
-    'descricao': [PARAMETROS_PRINCIPAIS[parametro] for parametro in parametros_modelo],
-    'expoente': modelo_rigidez.params[parametros_modelo].to_numpy(),
-    'erro_padrao': modelo_rigidez.bse[parametros_modelo].to_numpy(),
-    'IC_inf': intervalo_modelo[0].to_numpy(),
-    'IC_sup': intervalo_modelo[1].to_numpy(),
-    'teoria_viga': list(TEORIA_VIGA.values()),
-    'rho_simples': rho_com_rigidez[parametros_modelo].to_numpy(),
-})
-diferenca_padronizada = (elasticidades_df['expoente'] - elasticidades_df['teoria_viga']) / elasticidades_df['erro_padrao']
-elasticidades_df['p_vs_teoria'] = 2 * stats.t.sf(diferenca_padronizada.abs(), modelo_rigidez.df_resid)
-elasticidades_df['teoria_no_IC'] = elasticidades_df['teoria_viga'].between(elasticidades_df['IC_inf'], elasticidades_df['IC_sup'])
-rigidez_prevista = np.exp(modelo_rigidez.fittedvalues)
-
-# Versão das derivadas: o índice de rigidez já junta os quatro parâmetros na fórmula da teoria de viga, então
-# basta uma regressão ln K = b0 + b1·ln(índice). A teoria prevê b1 = 1 (K proporcional ao índice). A razão
-# K ÷ índice faz o papel do módulo do material; comparar essa razão entre professor e grupo mostra se as duas
-# origens seguem a mesma constante.
-modelo_indice = sm.OLS(np.log(derivadas_df['rigidez']), sm.add_constant(np.log(derivadas_df['indice_rigidez']))).fit()
-intervalo_indice = modelo_indice.conf_int(1 - NIVEL_CONFIANCA).loc['indice_rigidez']
-# Versão complementar do modelo com uma variável de origem (1 = professor, 0 = grupo). Ela mede quanto as molas
-# do professor são mais rígidas que as do grupo com a mesma geometria. Se for grande, há diferença sistemática
-# entre as origens (na medida de h do grupo ou na impressão), e os expoentes desta versão ficam mais precisos.
-log_com_origem = np.log(dados_df[parametros_modelo]).assign(professor=(dados_df['origem'] == 'professor').astype(float))
-modelo_com_origem = sm.OLS(np.log(dados_df['rigidez']), sm.add_constant(log_com_origem)).fit()
-intervalo_com_origem = modelo_com_origem.conf_int(1 - NIVEL_CONFIANCA)
-razao_rigidez_indice = (derivadas_df['rigidez'] / derivadas_df['indice_rigidez']).groupby(derivadas_df['origem']).agg(['median', 'min', 'max'])
-
-# Outliers pelos três métodos. Método 1: regra do boxplot em rigidez, dutilidade e cada parâmetro (e, em
-# separado, nas derivadas). Método 2: mola cujo resíduo no modelo de rigidez passa de 2 desvios-padrão, ou
-# seja, K muito diferente do previsto pela geometria, mesmo que o K em si pareça normal. Método 3: ensaio pouco
-# linear (R² baixo ou rigidez ponto a ponto variando mais de 20%). Cada mola apontada recebe o motivo e a
-# interpretação (erro de dado ou comportamento real). Estes três métodos só marcam; quem decide a eliminação é
-# a regra dos 2 boxplots, logo abaixo.
+# Marcação de outliers por dois métodos. Método 1: regra do boxplot em rigidez, dutilidade e cada parâmetro (e,
+# em separado, nas derivadas). Método 2: ensaio pouco linear (R² baixo ou rigidez ponto a ponto variando mais de
+# 20%). Cada mola apontada recebe o motivo e a interpretação (erro de dado ou comportamento real). Estes métodos
+# só marcam; quem decide a eliminação é a regra dos 2 boxplots, logo abaixo.
 rotulos_boxplot = {'rigidez': 'Rigidez K (kgf/mm)', 'dutilidade': 'Dutilidade (fração de C)', **PARAMETROS_PRINCIPAIS}
-residuo_padronizado = modelo_rigidez.resid / modelo_rigidez.resid.std()
-fora_residuo = dados_df[residuo_padronizado.abs() > LIMITE_RESIDUO]
 fora_linearidade = por_mola_df[(por_mola_df['R2'] < LIMITE_R2) | (por_mola_df['variacao_sem_primeiro'] > LIMITE_VARIACAO_PONTOS)]
 outliers_df = pd.concat([
     outliers_boxplot(dados_df, rotulos_boxplot, '1. boxplot'),
     outliers_boxplot(derivadas_df, PARAMETROS_DERIVADOS, '1. boxplot (derivadas)'),
-    pd.DataFrame({'ID': fora_residuo['ID'], 'metodo': '2. resíduo do modelo', 'grandeza': 'rigidez',
-                  'motivo': [f"K {(np.exp(residuo) - 1):+.0%} em relação ao previsto ({padronizado:+.2f} desvios-padrão)"
-                             for residuo, padronizado in zip(modelo_rigidez.resid[fora_residuo.index], residuo_padronizado[fora_residuo.index])]}),
-    pd.DataFrame({'ID': fora_linearidade['ID'], 'metodo': '3. linearidade do ensaio', 'grandeza': 'ensaio',
+    pd.DataFrame({'ID': fora_linearidade['ID'], 'metodo': '2. linearidade do ensaio', 'grandeza': 'ensaio',
                   'motivo': [f"sem o 1º ponto, a rigidez ponto a ponto varia {variacao:.0%}" + ('' if pd.isna(r2) or r2 >= LIMITE_R2 else f", R² {r2:.4f}")
                              for variacao, r2 in zip(fora_linearidade['variacao_sem_primeiro'], fora_linearidade['R2'])]}),
 ], ignore_index=True)
 outliers_df['origem'] = outliers_df['ID'].map(dados_df.set_index('ID')['origem'])
 resumo_outliers_df = outliers_df.groupby('ID').agg(origem=('origem', 'first'), metodos=('metodo', lambda metodos: ', '.join(sorted(set(metodos))))).reset_index()
 resumo_outliers_df['interpretacao'] = resumo_outliers_df['ID'].map(INTERPRETACAO_OUTLIERS).fillna('Sem interpretação registrada: analisar.')
-residuo_com_origem = modelo_com_origem.resid / modelo_com_origem.resid.std()
 
 # Regra de eliminação (a do artigo do professor): a mola é eliminada se ficar fora do limite do boxplot em 2 ou
 # mais grandezas de conferência. Uma marcação só não elimina, porque com poucas molas o boxplot marca valores
@@ -686,21 +627,19 @@ contagem_conferencia_df = fora_conferencia_df.groupby('ID')['grandeza'].agg(boxp
 contagem_conferencia_df['eliminada'] = contagem_conferencia_df['boxplots'] >= MINIMO_BOXPLOTS_PARA_ELIMINAR
 ids_eliminados = contagem_conferencia_df.loc[contagem_conferencia_df['eliminada'], 'ID'].tolist()
 
-# Comparação com e sem outliers. Cada cenário tira um conjunto de molas marcadas e refaz as correlações de
-# Spearman (principais e derivadas) e os expoentes do modelo de rigidez. Cenários: sem cada mola marcada, uma
-# de cada vez; sem as prováveis de erro de dado (interpretação que começa com "Provável erro de dado"), tiradas
-# só das análises que usam a grandeza com erro; e, como teste de estresse, sem todas as marcadas (não serve como
-# conclusão, porque tira também valores extremos verdadeiros e encolhe a faixa dos dados). Uma conclusão "muda"
-# quando o par troca de significativo para não significativo (ou o contrário), ou quando um par significativo
-# troca de sinal. Com menos molas o |ρ| exigido sobe, então parte
-# das perdas de significância vem só de ter menos dados. Nenhuma mola sai da análise principal.
+# Comparação com e sem outliers. Cada cenário tira um conjunto de molas e refaz as correlações de Spearman
+# (principais e derivadas). Cenários: sem cada mola marcada, uma de cada vez; sem os prováveis erros de dado
+# (interpretação que começa com "Provável erro de dado"), tirados só das análises que usam a grandeza com erro; e
+# sem as molas eliminadas pela regra dos 2 boxplots, quando houver. Uma conclusão "muda" quando o par troca de
+# significativo para não significativo (ou o contrário), ou quando um par significativo troca de sinal. Com
+# menos molas o |ρ| exigido sobe, então parte das perdas de significância vem só de ter menos dados.
 ids_marcados = resumo_outliers_df['ID'].tolist()
 ids_erro_de_dado = [id_mola for id_mola in ids_marcados if INTERPRETACAO_OUTLIERS.get(id_mola, '').startswith('Provável erro de dado')]
 # Cada cenário diz, para cada mola tirada, de quais grandezas ela sai (None = sai de tudo).
 cenarios = {'todas as molas': {}, **{f'sem a {id_mola}': {id_mola: None} for id_mola in ids_marcados},
             'sem prováveis erros de dado': {id_mola: GRANDEZAS_AFETADAS_POR_ERRO.get(id_mola) for id_mola in ids_erro_de_dado},
             **({'sem as eliminadas pela regra dos 2 boxplots': {id_mola: None for id_mola in ids_eliminados}} if ids_eliminados else {}),
-            'teste de estresse: sem todas as marcadas': {id_mola: None for id_mola in ids_marcados}}
+            }
 
 
 def ids_fora(cenario, colunas_usadas):
@@ -713,23 +652,17 @@ pares_analisados = [(tabela, parametro, descricao, resultado, coluna_resultado)
                     for tabela, parametros in ((dados_df, PARAMETROS_PRINCIPAIS), (derivadas_df, PARAMETROS_DERIVADOS))
                     for parametro, descricao in parametros.items()
                     for resultado, coluna_resultado in (('Rigidez K', 'rigidez'), ('Dutilidade', 'dutilidade'))]
-partes_correlacao, partes_expoentes = [], []
+partes_correlacao = []
 for nome_cenario, cenario in cenarios.items():
     for tabela, parametro, descricao, resultado, coluna_resultado in pares_analisados:
         restantes = tabela[~tabela['ID'].isin(ids_fora(cenario, [parametro, coluna_resultado]))]
         linha = correlacoes_spearman(restantes, {parametro: descricao}).query('resultado == @resultado')
         partes_correlacao.append(linha.assign(cenario=nome_cenario, molas=len(restantes)))
-    ficam = ~dados_df['ID'].isin(ids_fora(cenario, [*parametros_modelo, 'rigidez']))
-    modelo_cenario = sm.OLS(np.log(dados_df.loc[ficam, 'rigidez']), sm.add_constant(np.log(dados_df.loc[ficam, parametros_modelo]))).fit()
-    partes_expoentes.append(modelo_cenario.params[parametros_modelo].rename(nome_cenario))
 correlacoes_cenarios_df = pd.concat(partes_correlacao, ignore_index=True)
 base = correlacoes_cenarios_df[correlacoes_cenarios_df['cenario'] == 'todas as molas'].set_index(['resultado', 'parametro'])
 comparacao = correlacoes_cenarios_df.merge(base[['rho', 'significativo']].reset_index(), on=['resultado', 'parametro'], suffixes=('', '_todas'))
 comparacao['muda'] = (comparacao['significativo'] != comparacao['significativo_todas']) | ((np.sign(comparacao['rho']) * np.sign(comparacao['rho_todas']) < 0) & comparacao['significativo_todas'])
 mudancas_df = comparacao[comparacao['muda']][['cenario', 'resultado', 'parametro', 'molas', 'rho_todas', 'rho', 'p_valor', 'significativo']]
-expoentes_cenarios_df = pd.DataFrame(partes_expoentes)
-expoentes_cenarios_df.loc['teoria de viga'] = list(TEORIA_VIGA.values())
-
 teste_rigidez_dutilidade = stats.spearmanr(dados_df['rigidez'], dados_df['dutilidade'])
 correlacao_rigidez_dutilidade = pd.DataFrame({'parametro': ['rigidez'], 'rho': [teste_rigidez_dutilidade.statistic],
                                               'p_valor': [teste_rigidez_dutilidade.pvalue],
@@ -753,47 +686,38 @@ print(dados_df)
 # completas (estatísticas, correlações, matrizes, elasticidades, modelos) vão para a planilha de resultados.
 print("AVISO: molas sem IC e sem R² por ter poucos pontos:", por_mola_df.loc[por_mola_df['pontos'] < MINIMO_PONTOS_POR_MOLA, 'ID'].tolist())
 print("AVISO: C suspeito nas molas", IDS_C_SUSPEITO, "(afeta a dutilidade; valor não corrigido)")
-print(f"\nOutliers (boxplot: {FATOR_IQR}·IQR; resíduo: {LIMITE_RESIDUO} desvios-padrão; linearidade: R² < {LIMITE_R2} ou variação > {LIMITE_VARIACAO_PONTOS:.0%})")
+print(f"\nMarcação de outliers (boxplot: {FATOR_IQR}·IQR; linearidade: R² < {LIMITE_R2} ou variação > {LIMITE_VARIACAO_PONTOS:.0%})")
 print(outliers_df[['ID', 'origem', 'metodo', 'motivo']].sort_values(['ID', 'metodo']).to_string(index=False))
 print("\nResumo por mola, com a interpretação")
 for _, mola in resumo_outliers_df.iterrows():
     print(f"  Mola {mola['ID']} ({mola['origem']}; {mola['metodos']}): {mola['interpretacao']}")
-print("Com a variável de origem no modelo, nenhuma mola passa de 2 desvios-padrão no resíduo (maior: mola "
-      f"{dados_df['ID'][residuo_com_origem.abs().idxmax()]}, {residuo_com_origem[residuo_com_origem.abs().idxmax()]:+.2f})."
-      if residuo_com_origem.abs().max() <= LIMITE_RESIDUO else "Com a variável de origem, ainda há molas acima de 2 desvios-padrão.")
 print(f"\nRegra de eliminação: fora do limite em {MINIMO_BOXPLOTS_PARA_ELIMINAR} ou mais boxplots de conferência ({', '.join(ROTULOS_CONFERENCIA)})")
 print(contagem_conferencia_df.to_string(index=False) if len(contagem_conferencia_df) else "  nenhuma mola fora do limite")
 print("Molas eliminadas pela regra:", ids_eliminados if ids_eliminados else "nenhuma (cada mola marcada aparece em um boxplot só)")
 print("Valores com provável erro de dado saem só das grandezas afetadas:", GRANDEZAS_AFETADAS_POR_ERRO)
 print("\nCom e sem outliers: conclusões de correlação que mudam (significância ou sinal) em relação a todas as molas")
 print(mudancas_df.to_string(index=False, float_format='{:.4f}'.format) if len(mudancas_df) else "  nenhuma")
-mudancas_conclusivas = mudancas_df[~mudancas_df['cenario'].str.startswith('teste de estresse')]  # o teste de estresse não entra na conclusão
-pares_estaveis = base[base['significativo']].index.difference(mudancas_conclusivas.set_index(['resultado', 'parametro']).index)
-print("Pares significativos que não mudam em nenhum cenário (fora o teste de estresse):", ', '.join(f"{resultado} × {parametro}" for resultado, parametro in pares_estaveis))
-print(f"Atenção: com menos molas o |ρ| exigido sobe (no teste de estresse ficam {len(dados_df) - len(ids_marcados)} molas e o limite vai a {rho_minimo_significativo(len(dados_df) - len(ids_marcados)):.2f}); parte das perdas vem só disso.")
+pares_estaveis = base[base['significativo']].index.difference(mudancas_df.set_index(['resultado', 'parametro']).index)
+print("Pares significativos que não mudam em nenhum cenário:", ', '.join(f"{resultado} × {parametro}" for resultado, parametro in pares_estaveis))
 
 # Resumo do comportamento geral, em linguagem simples. Todos os números vêm das variáveis calculadas acima,
 # então o texto se atualiza sozinho se a planilha mudar. As molas marcadas são agrupadas pelo começo da
-# interpretação (comportamento real, provável erro de dado, efeito de medida ou incerto).
+# interpretação (comportamento real, provável erro de dado ou efeito de medida).
 mais_rigida, menos_rigida = dados_df.loc[dados_df['rigidez'].idxmax()], dados_df.loc[dados_df['rigidez'].idxmin()]
 mais_dutil, menos_dutil = dados_df.loc[dados_df['dutilidade'].idxmax()], dados_df.loc[dados_df['dutilidade'].idxmin()]
-expoente = elasticidades_df.set_index('parametro')['expoente']
-cenarios_conclusivos = [nome for nome in cenarios if not nome.startswith('teste de estresse')]
-pares_frageis = mudancas_df[mudancas_df['cenario'].isin(cenarios_conclusivos)][['resultado', 'parametro']].drop_duplicates()
+pares_frageis = mudancas_df[['resultado', 'parametro']].drop_duplicates()
 grupos_interpretacao = {rotulo: resumo_outliers_df.loc[resumo_outliers_df['interpretacao'].str.startswith(inicio), 'ID'].tolist()
                         for rotulo, inicio in (('comportamento real', 'Comportamento real'), ('provável erro de dado', 'Provável erro'),
-                                               ('efeito de medida', 'Efeito de medida'), ('incerto', 'Incerto'))}
+                                               ('efeito de medida', 'Efeito de medida'), ('sem interpretação', 'Sem interpretação'))}
 molas_sem_r2 = por_mola_df.loc[por_mola_df['R2'].isna(), 'ID'].tolist()
-dois_que_mais_pesam = elasticidades_df.reindex(elasticidades_df['expoente'].abs().sort_values(ascending=False).index)['descricao'].head(2).str.split(' ').str[0].str.lower().tolist()
 robustos_dutilidade = [parametro for resultado, parametro in pares_estaveis if resultado == 'Dutilidade']
-significativo_com_rigidez = correlacoes_principais_df.query("resultado == 'Rigidez K'").set_index('parametro')['significativo']
-efeito_claro = (elasticidades_df['IC_inf'] > 0) | (elasticidades_df['IC_sup'] < 0) #IC do expoente não passa pelo zero
-escondidos_no_rho = elasticidades_df[~elasticidades_df['parametro'].map(significativo_com_rigidez) & efeito_claro]
 alongamento_falha = dados_df['dutilidade'] * dados_df['C'] #alongamento na falha em mm, sem dividir por C
 alongamento_com_h = stats.spearmanr(dados_df['h'], alongamento_falha)
 alongamento_com_fio = stats.spearmanr(derivadas_df['fio_desenvolvido'], alongamento_falha)
-compara_origens = {coluna: stats.mannwhitneyu(*[dados_df.loc[dados_df['origem'] == origem, coluna] for origem in ('professor', 'grupo')]).pvalue for coluna in ('rigidez', 'dutilidade')}
 medianas_por_espiras = dados_df.groupby('n').agg(molas=('ID', 'size'), rigidez_mediana=('rigidez', 'median'), dutilidade_mediana=('dutilidade', 'median'))
+pearson_por_par = pearson_df.set_index(['resultado', 'parametro'])['r']
+maiores_medidos = {resultado: grupo.loc[grupo['r'].abs().idxmax()] for resultado, grupo in pearson_df[pearson_df['grupo'] == 'principais'].groupby('resultado')}
+fortes_derivadas = pearson_df[(pearson_df['grupo'] == 'derivadas') & pearson_df['forte']]
 print("\n" + "=" * 100)
 print("COMPORTAMENTO GERAL DO SISTEMA")
 print("=" * 100)
@@ -803,25 +727,25 @@ print(f"2. A rigidez vai de {menos_rigida['rigidez']:.4f} (mola {menos_rigida['I
       f"{mais_rigida['rigidez'] / menos_rigida['rigidez']:.0f} vezes; a dutilidade vai de {menos_dutil['dutilidade']:.0%} (mola {menos_dutil['ID']}) "
       f"a {mais_dutil['dutilidade']:.0%} (mola {mais_dutil['ID']}). Como os valores são assimétricos, a mediana representa melhor: "
       f"{dados_df['rigidez'].median():.4f} kgf/mm e {dados_df['dutilidade'].median():.0%}.")
-print(f"3. A rigidez segue a teoria de viga (K proporcional a t·h³ / (n·Ltot³)): o modelo explica {modelo_rigidez.rsquared:.1%} da variação. "
-      f"Com os outros fixos, +1% em h dá {expoente['h']:+.1f}% em K, +1% em Ltot dá {expoente['Ltot']:+.1f}%, +1% em n dá {expoente['n']:+.1f}% "
-      f"e +1% em t dá {expoente['t']:+.1f}%. O que mais pesa: {' e '.join(dois_que_mais_pesam)}.")
+print(f"3. A rigidez segue a teoria de viga: o índice de rigidez t·h³ / (n·Ltot³) tem r = {pearson_por_par[('Rigidez K', 'indice_rigidez')]:+.2f} com K, "
+      f"e a reta K = {inclinacao_simples:.1f} × índice {intercepto_simples:+.4f} explica {r2_simples:.1%} da variação.")
 print("4. A dutilidade (alongamento na falha ÷ C) cai quando h aumenta e sobe com a esbeltez (Ltot/h). Cuidado: o alongamento em mm")
 print(f"   quase não depende de h (ρ = {alongamento_com_h.statistic:+.2f}); ele cresce com o comprimento de fio que trabalha (fio desenvolvido, "
       f"ρ = {alongamento_com_fio.statistic:+.2f}). O efeito de h na dutilidade vem em boa parte de C, que está no denominador e cresce com h.")
-print("   Relações com a dutilidade que valem em todos os cenários com e sem outliers (fora o teste de estresse): " + (', '.join(robustos_dutilidade) or 'nenhuma') + ".")
+print("   Relações com a dutilidade que valem em todos os cenários com e sem outliers: " + (', '.join(robustos_dutilidade) or 'nenhuma') + ".")
 print(f"5. Rigidez e dutilidade andam em sentidos opostos (ρ = {teste_rigidez_dutilidade.statistic:+.2f}): a geometria que deixa a mola rígida")
 print("   é a mesma que limita o alongamento, e a dutilidade ainda divide por C. Não é o material ficando frágil.")
-print("6. Correlação simples engana: " + ("; ".join(f"{linha.parametro} não é significativo no ρ ({linha.rho_simples:+.2f}), mas com os outros fixos "
-      f"tem efeito claro (expoente {linha.expoente:+.2f})" for linha in escondidos_no_rho.itertuples()) or "nenhum parâmetro fica escondido no ρ")
-      + ". Parâmetros que andam juntos no desenho das molas (L e Ltot; h e C) não se separam.")
-print(f"7. Em valores absolutos, professor e grupo não diferem (Mann-Whitney: rigidez p = {compara_origens['rigidez']:.2f}, dutilidade "
-      f"p = {compara_origens['dutilidade']:.2f}), mas com a mesma geometria as molas do professor ficam "
-      f"{np.exp(modelo_com_origem.params['professor']) - 1:.0%} mais rígidas. Possíveis causas: h do grupo medido acima do que trabalha")
-print("   (mediana de várias medidas em peças com falhas) ou diferença de impressão; estes dados não separam as duas.")
+print(f"6. Nenhum parâmetro medido sozinho chega a |r| = {LIMITE_PEARSON:.2f} (maiores: " + "; ".join(
+      f"{resultado}: {linha['parametro']} {linha['r']:+.2f}" for resultado, linha in maiores_medidos.items())
+      + "). As relações fortes aparecem nas dimensões derivadas: " + "; ".join(
+      f"{linha.parametro} × {linha.resultado} {linha.r:+.2f}" for linha in fortes_derivadas.itertuples()) + ".")
+print(f"7. Medida de h: nas molas do professor o h medido fica em média {desvio_h_por_origem.loc['professor', 'mean']:+.2f} mm em relação ao nominal; "
+      f"nas do grupo, {desvio_h_por_origem.loc['grupo', 'mean']:+.2f} mm (de {desvio_h_por_origem.loc['grupo', 'min']:+.2f} a {desvio_h_por_origem.loc['grupo', 'max']:+.2f}).")
+print(f"   Com o h nominal, o R² da reta K × índice de rigidez vai de {r2_simples:.3f} para {r2_com_h_nominal:.3f}: as molas do grupo se comportam como se")
+print("   tivessem o h nominal, o que indica h medido acima do que trabalha. As molas foram descartadas após o ensaio, então não foi possível remedir.")
 print(f"8. Outliers: {len(ids_marcados)} molas marcadas; eliminadas pela regra dos 2 boxplots: {', '.join(map(str, ids_eliminados)) or 'nenhuma'}. " + "; ".join(
       f"{rotulo}: {', '.join(map(str, ids))}" for rotulo, ids in grupos_interpretacao.items() if ids) + ".")
-print("   Conclusões que dependem de uma mola ou das prováveis de erro: "
+print("   Conclusões que dependem de uma mola ou dos prováveis erros de dado: "
       + (', '.join(f"{resultado} × {parametro}" for resultado, parametro in pares_frageis.itertuples(index=False)) or 'nenhuma') + ".")
 print("=" * 100)
 
@@ -890,15 +814,12 @@ grafico_boxplots(conferencia_df, ROTULOS_CONFERENCIA, fora_conferencia_df, "Gran
 grafico_matriz(matriz_principais_rho, matriz_principais_p, list(PARAMETROS_PRINCIPAIS.values()), "Correlação entre os parâmetros principais", "matriz_parametros_principais.png")
 grafico_matriz(matriz_derivadas_rho, matriz_derivadas_p, list(PARAMETROS_DERIVADOS.values()), "Correlação entre as dimensões derivadas", "matriz_dimensoes_derivadas.png")
 grafico_dispersoes(dados_df, {'rigidez': 'Rigidez K (kgf/mm)'}, 'dutilidade', 'Dutilidade (fração de C)', correlacao_rigidez_dutilidade, "rigidez_x_dutilidade.png")
-# Gráficos das elasticidades: expoentes medidos contra a teoria de viga e rigidez prevista × medida.
-grafico_elasticidades(elasticidades_df, "elasticidades_rigidez.png")
-grafico_previsto_medido(dados_df, rigidez_prevista, modelo_rigidez.rsquared, "rigidez_prevista_x_medida.png")
-# Gráficos dos outliers: boxplots (parâmetros principais e derivadas), resíduo do modelo por mola e as curvas
-# carga × alongamento de cada ensaio.
+# Gráficos dos outliers: boxplots (parâmetros principais e derivadas) e as curvas carga × alongamento de cada
+# ensaio. Depois, o desvio do h medido em relação ao nominal.
 grafico_boxplots(dados_df, rotulos_boxplot, outliers_df[outliers_df['metodo'] == '1. boxplot'], "Rigidez, dutilidade e parâmetros principais", "boxplots_principais.png")
 grafico_boxplots(derivadas_df, PARAMETROS_DERIVADOS, outliers_df[outliers_df['metodo'] == '1. boxplot (derivadas)'], "Dimensões derivadas", "boxplots_derivadas.png")
-grafico_residuos(dados_df, residuo_padronizado, "residuos_modelo_rigidez.png")
 grafico_curvas_ensaio(ensaios_df, por_mola_df, "curvas_carga_alongamento.png")
+grafico_desvio_h(medidas_h_df, "desvio_h_nominal.png")
 # Gráfico da comparação com e sem as molas marcadas (parâmetros principais).
 grafico_com_sem_outliers(correlacoes_cenarios_df, PARAMETROS_PRINCIPAIS, rho_minimo, "Correlações com e sem outliers: parâmetros principais", "com_sem_outliers_principais.png")
 # Gráfico final: rigidez e dutilidade por número de espiras.
@@ -906,7 +827,7 @@ grafico_por_espiras(dados_df, "por_numero_de_espiras.png")
 
 # Planilha de resultados em saidas/ (a planilha de entrada não é alterada). Uma aba por tabela calculada:
 # rigidez e dutilidade de cada mola com as dimensões, derivadas, estatísticas, correlações, matrizes,
-# pares significativos, elasticidades, modelos, outliers, comparação com e sem outliers e medianas por n.
+# pares significativos, Pearson, medidas de h, outliers, comparação com e sem outliers e medianas por n.
 arquivo_resultados = os.path.join(PASTA_SAIDAS, "experimento_resultados.xlsx")
 with pd.ExcelWriter(arquivo_resultados) as planilha_resultados:
     dados_df.drop(columns=['rigidez', 'dutilidade']).merge(por_mola_df, on=['ID', 'origem']).to_excel(planilha_resultados, sheet_name='resultados_por_mola', index=False)
@@ -915,7 +836,7 @@ with pd.ExcelWriter(arquivo_resultados) as planilha_resultados:
     pd.concat([correlacoes_principais_df, correlacoes_derivadas_df]).to_excel(planilha_resultados, sheet_name='correlacoes', index=False)
     matriz_principais_rho.to_excel(planilha_resultados, sheet_name='matriz_principais')
     matriz_derivadas_rho.to_excel(planilha_resultados, sheet_name='matriz_derivadas')
-    elasticidades_df.to_excel(planilha_resultados, sheet_name='elasticidades', index=False)
+    medidas_h_df.to_excel(planilha_resultados, sheet_name='medidas_h', index=False)
     pearson_df.to_excel(planilha_resultados, sheet_name='pearson', index=False)
     matriz_pearson_r.to_excel(planilha_resultados, sheet_name='matriz_pearson')
     pd.DataFrame({'inclinacao': [inclinacao_simples], 'intercepto': [intercepto_simples], 'R2': [r2_simples]}).to_excel(planilha_resultados, sheet_name='regressao_simples', index=False)
@@ -924,13 +845,7 @@ with pd.ExcelWriter(arquivo_resultados) as planilha_resultados:
     outliers_df.to_excel(planilha_resultados, sheet_name='outliers', index=False)
     resumo_outliers_df.to_excel(planilha_resultados, sheet_name='outliers_resumo', index=False)
     mudancas_df.to_excel(planilha_resultados, sheet_name='com_sem_outliers', index=False)
-    expoentes_cenarios_df.to_excel(planilha_resultados, sheet_name='expoentes_por_cenario')
     pd.concat({'principais': pares_significativos(matriz_principais_rho, matriz_principais_p),
                'derivadas': pares_significativos(matriz_derivadas_rho, matriz_derivadas_p)}).to_excel(planilha_resultados, sheet_name='pares_significativos')
-    pd.concat([modelo_com_origem.params.rename('coeficiente'), intervalo_com_origem.rename(columns={0: 'IC_inf', 1: 'IC_sup'})],
-              axis=1).to_excel(planilha_resultados, sheet_name='modelo_com_origem')
-    pd.DataFrame({'b1': [modelo_indice.params['indice_rigidez']], 'IC_inf': [intervalo_indice[0]], 'IC_sup': [intervalo_indice[1]],
-                  'R2': [modelo_indice.rsquared]}).to_excel(planilha_resultados, sheet_name='modelo_indice', index=False)
-    razao_rigidez_indice.to_excel(planilha_resultados, sheet_name='razao_K_indice')
     medianas_por_espiras.to_excel(planilha_resultados, sheet_name='por_numero_de_espiras')
 print(f"\nPlanilha de resultados gravada em {arquivo_resultados}")
